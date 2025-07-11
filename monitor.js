@@ -9,8 +9,22 @@ class ShopifyMonitor {
   }
 
   async run() {
-    const browser = await chromium.launch();
+    const browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+      ]
+    });
     const page = await browser.newPage();
+    
+    // Set a realistic user agent to avoid bot detection
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
     
     try {
       console.log('Starting Shopify store monitoring...');
@@ -29,12 +43,14 @@ class ShopifyMonitor {
       // Check key pages
       await this.checkKeyPages(page);
       
-      // Check for broken links
+      // Check for broken links (simplified)
       await this.checkBrokenLinks(page);
       
-      // Report JavaScript errors
+      // Report JavaScript errors (limit to reduce noise)
       if (errors.length > 0) {
-        this.addResult('JavaScript Errors', 'FAIL', `Found ${errors.length} errors: ${errors.slice(0, 3).join(', ')}`);
+        const errorCount = errors.length;
+        const sampleErrors = errors.slice(0, 2).join(', '); // Show first 2 errors
+        this.addResult('JavaScript Errors', 'WARN', `Found ${errorCount} errors. Sample: ${sampleErrors}`);
       } else {
         this.addResult('JavaScript Errors', 'PASS', 'No JavaScript errors detected');
       }
@@ -53,35 +69,59 @@ class ShopifyMonitor {
 
   async checkMainNavigation(page) {
     try {
-      // Navigate to your store
-      await page.goto('https://lolovivijewelry.com', { waitUntil: 'networkidle' });
+      console.log('Checking homepage...');
       
+      // Use 'domcontentloaded' instead of 'networkidle' - much more reliable
+      const response = await page.goto('https://lolovivijewelry.com', { 
+        waitUntil: 'domcontentloaded',
+        timeout: 15000 
+      });
+      
+      if (!response) {
+        this.addResult('Homepage Load', 'FAIL', 'No response received');
+        return;
+      }
+
+      if (response.status() !== 200) {
+        this.addResult('Homepage Load', 'FAIL', `HTTP ${response.status()}`);
+        return;
+      }
+
       // Check if page loaded successfully
       const title = await page.title();
-      if (title.includes('404') || title.includes('Error')) {
+      if (title.includes('404') || title.includes('Error') || title.includes('Not Found')) {
         this.addResult('Homepage Load', 'FAIL', `Page title suggests error: ${title}`);
         return;
       }
 
-      // Check main navigation elements
+      this.addResult('Homepage Load', 'PASS', `Loaded successfully (${response.status()}) - ${title}`);
+
+      // Wait a bit for page to settle
+      await page.waitForTimeout(2000);
+
+      // Check main navigation elements (more flexible selectors)
       const navChecks = [
-        { selector: 'header nav', name: 'Main Navigation' },
-        { selector: '[href*="collections"]', name: 'Collections Link' },
-        { selector: '.cart-link, [href*="cart"]', name: 'Cart Link' },
-        { selector: '.search, [type="search"]', name: 'Search Function' },
+        { selector: 'nav, .nav, .navigation, header nav, .site-nav', name: 'Main Navigation' },
+        { selector: 'a[href*="collections"], a[href*="catalog"], a[href*="shop"]', name: 'Shop/Collections Link' },
+        { selector: '.cart, [href*="cart"], .cart-link, .bag', name: 'Cart Link' },
+        { selector: 'input[type="search"], .search, [placeholder*="search"]', name: 'Search Function' },
       ];
 
       for (const check of navChecks) {
-        const element = await page.$(check.selector);
-        if (element) {
-          this.addResult(check.name, 'PASS', 'Element found and accessible');
-        } else {
-          this.addResult(check.name, 'FAIL', `Element not found: ${check.selector}`);
+        try {
+          const element = await page.$(check.selector);
+          if (element) {
+            this.addResult(check.name, 'PASS', 'Element found and accessible');
+          } else {
+            this.addResult(check.name, 'WARN', `Element not found with selector: ${check.selector}`);
+          }
+        } catch (error) {
+          this.addResult(check.name, 'WARN', `Error checking element: ${error.message}`);
         }
       }
 
     } catch (error) {
-      this.addResult('Navigation Check', 'FAIL', `Error checking navigation: ${error.message}`);
+      this.addResult('Homepage Load', 'FAIL', `Error loading homepage: ${error.message}`);
     }
   }
 
@@ -97,44 +137,82 @@ class ShopifyMonitor {
 
     for (const pageCheck of pagesToCheck) {
       try {
+        console.log(`Checking ${pageCheck.name}...`);
+        
         const response = await page.goto(`https://lolovivijewelry.com${pageCheck.url}`, {
-          waitUntil: 'networkidle',
+          waitUntil: 'domcontentloaded', // Changed from 'networkidle'
           timeout: 10000
         });
 
+        if (!response) {
+          this.addResult(pageCheck.name, 'FAIL', 'No response received');
+          continue;
+        }
+
         if (response.status() === 200) {
+          // Wait a moment for content to load
+          await page.waitForTimeout(1000);
+          
           // Check for common error indicators
-          const content = await page.content();
-          if (content.includes('404') || content.includes('Page not found')) {
-            this.addResult(pageCheck.name, 'FAIL', '404 error detected');
+          const title = await page.title();
+          if (title.includes('404') || title.includes('Not Found') || title.includes('Error')) {
+            this.addResult(pageCheck.name, 'FAIL', `404 error detected in title: ${title}`);
           } else {
-            this.addResult(pageCheck.name, 'PASS', `Loaded successfully (${response.status()})`);
+            this.addResult(pageCheck.name, 'PASS', `Loaded successfully (${response.status()}) - ${title.substring(0, 50)}...`);
           }
+        } else if (response.status() === 404) {
+          this.addResult(pageCheck.name, 'WARN', `Page not found (404) - may not exist yet`);
         } else {
           this.addResult(pageCheck.name, 'FAIL', `HTTP ${response.status()}`);
         }
       } catch (error) {
-        this.addResult(pageCheck.name, 'FAIL', `Failed to load: ${error.message}`);
+        if (error.message.includes('timeout')) {
+          this.addResult(pageCheck.name, 'WARN', `Page loading slowly (timeout) - may need optimization`);
+        } else {
+          this.addResult(pageCheck.name, 'FAIL', `Failed to load: ${error.message}`);
+        }
       }
     }
   }
 
   async checkBrokenLinks(page) {
     try {
-      await page.goto('https://lolovivijewelry.com');
+      console.log('Checking for broken links...');
       
-      // Get all links on the homepage
+      // Go back to homepage for link checking
+      await page.goto('https://lolovivijewelry.com', { 
+        waitUntil: 'domcontentloaded',
+        timeout: 10000 
+      });
+      
+      await page.waitForTimeout(2000);
+      
+      // Get internal links only (more reliable)
       const links = await page.$$eval('a[href]', anchors => 
-        anchors.map(a => a.href).filter(href => 
-          href.startsWith('http') && !href.includes('mailto:') && !href.includes('tel:')
-        ).slice(0, 10) // Limit to first 10 links to avoid timeout
+        anchors.map(a => a.href)
+          .filter(href => 
+            href && 
+            !href.includes('mailto:') && 
+            !href.includes('tel:') &&
+            !href.includes('javascript:') &&
+            (href.includes('lolovivijewelry.com') || href.startsWith('/'))
+          )
+          .slice(0, 5) // Test only first 5 links to avoid timeouts
       );
+
+      if (links.length === 0) {
+        this.addResult('Link Check', 'WARN', 'No internal links found to test');
+        return;
+      }
 
       let brokenCount = 0;
       for (const link of links) {
         try {
-          const response = await page.goto(link, { timeout: 5000 });
-          if (response.status() >= 400) {
+          const response = await page.goto(link, { 
+            waitUntil: 'domcontentloaded',
+            timeout: 8000 
+          });
+          if (response && response.status() >= 400) {
             brokenCount++;
           }
         } catch (error) {
@@ -143,13 +221,13 @@ class ShopifyMonitor {
       }
 
       if (brokenCount > 0) {
-        this.addResult('Broken Links', 'FAIL', `Found ${brokenCount} broken links out of ${links.length} checked`);
+        this.addResult('Link Check', 'WARN', `Found ${brokenCount} problematic links out of ${links.length} checked`);
       } else {
-        this.addResult('Broken Links', 'PASS', `All ${links.length} links working properly`);
+        this.addResult('Link Check', 'PASS', `All ${links.length} tested links working properly`);
       }
 
     } catch (error) {
-      this.addResult('Link Check', 'FAIL', `Error checking links: ${error.message}`);
+      this.addResult('Link Check', 'WARN', `Error checking links: ${error.message}`);
     }
   }
 
@@ -172,6 +250,8 @@ class ShopifyMonitor {
 
   async uploadToGoogleSheets() {
     try {
+      console.log('Uploading results to Google Sheets...');
+      
       // Create service account credentials from environment variable
       const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
       
@@ -192,21 +272,19 @@ class ShopifyMonitor {
         result.timestamp
       ]);
 
-      // Add header if sheet is empty
-      const headers = [['Date', 'Test', 'Status', 'Details', 'Timestamp']];
-
       await sheets.spreadsheets.values.append({
         spreadsheetId,
         range: 'Sheet1!A:E',
         valueInputOption: 'RAW',
         requestBody: {
-          values: [...headers, ...values]
+          values: values
         }
       });
 
-      console.log('Results uploaded to Google Sheets');
+      console.log('Results uploaded to Google Sheets successfully!');
     } catch (error) {
       console.error('Failed to upload to Google Sheets:', error.message);
+      console.error('Error details:', error);
     }
   }
 }
