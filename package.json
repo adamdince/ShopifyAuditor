@@ -1,0 +1,14 @@
+{
+  "name": "shopify-site-monitor",
+  "version": "1.0.0",
+  "description": "Daily site monitoring for Shopify store",
+  "scripts": {
+    "test": "playwright test",
+    "monitor": "node monitor.js"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.40.0",
+    "googleapis": "^126.0.1",
+    "node-fetch": "^3.3.2"
+  }
+}
